@@ -1,0 +1,84 @@
+import asyncio
+import logging
+import os
+
+from dotenv import load_dotenv
+from telegram import Update
+from telegram.constants import ChatAction
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
+import replicate
+
+load_dotenv()  # loads .env locally; on Railway, env vars come from the dashboard instead
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
+
+TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+REPLICATE_API_TOKEN = os.environ["REPLICATE_API_TOKEN"]
+os.environ["REPLICATE_API_TOKEN"] = REPLICATE_API_TOKEN
+
+# Text-to-video model on Replicate. Check https://replicate.com/collections/text-to-video
+# for the current best option and swap this if the one below gets deprecated.
+REPLICATE_MODEL = os.environ.get(
+    "REPLICATE_MODEL",
+    "anotherjesse/zeroscope-v2-xl:9f747673945c62801b13b84701c783929c0ee784e4748ec062204894dda1a99",
+)
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Send me a text prompt and I'll generate a short video for you.\n\n"
+        "Example: a cat surfing on a wave, cinematic lighting"
+    )
+
+
+async def run_replicate(prompt: str):
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None, lambda: replicate.run(REPLICATE_MODEL, input={"prompt": prompt})
+    )
+
+
+async def generate_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    prompt = (update.message.text or "").strip()
+    if not prompt:
+        await update.message.reply_text("Send me a text prompt first.")
+        return
+
+    status_msg = await update.message.reply_text(
+        "Generating your video... this can take a minute or two."
+    )
+    await context.bot.send_chat_action(
+        chat_id=update.effective_chat.id, action=ChatAction.UPLOAD_VIDEO
+    )
+
+    try:
+        output = await run_replicate(prompt)
+        video_url = output[0] if isinstance(output, list) else output
+        await update.message.reply_video(video=video_url, caption=f'Prompt: "{prompt}"')
+    except Exception as e:
+        logger.exception("Video generation failed")
+        await update.message.reply_text(f"Something went wrong generating the video: {e}")
+    finally:
+        await status_msg.delete()
+
+
+def main():
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, generate_video))
+    logger.info("Bot starting (polling mode)...")
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
